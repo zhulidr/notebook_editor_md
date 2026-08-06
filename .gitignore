@@ -1,0 +1,34 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+src-tauri/target/
+
+# npm 缓存
+.npm-cache/
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 日志与临时文件
+*.log
+*.tmp
+*.bak
+src-tauri/stderr.txt
+src-tauri/stdout.txt
+
+# Vite 临时时间戳文件
+*.timestamp-*.mjs

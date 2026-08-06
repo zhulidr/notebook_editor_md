@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "默认能力：允许调用核心 API 与自定义命令",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
