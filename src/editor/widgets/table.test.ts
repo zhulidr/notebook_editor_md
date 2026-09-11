@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
 import { TableWidget, preserveMarkers } from './table';
 
@@ -8,7 +7,11 @@ describe('TableWidget', () => {
   it('基本表格：表头 + 一行', () => {
     const w = new TableWidget('| a | b |\n|---|---|\n| 1 | 2 |', 0, fakeView);
     const el = w.toDOM();
-    expect(el.tagName).toBe('TABLE');
+    expect(el.tagName).toBe('DIV');
+    expect(el.className).toBe('md-table-wrapper');
+    expect(el.querySelector('table')?.tagName).toBe('TABLE');
+    expect(el.querySelector('.md-table-add-row')).not.toBeNull();
+    expect(el.querySelector('.md-table-add-col')).not.toBeNull();
     expect(el.querySelectorAll('th').length).toBe(2);
     expect(el.querySelectorAll('tbody tr').length).toBe(1);
     expect(el.querySelector('th')!.textContent).toBe('a');
