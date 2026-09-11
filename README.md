@@ -1,38 +1,261 @@
-# notebook_editor_md
+# Notebook Editor MD
 
-自用 Markdown 编辑器
+A lightweight, open-source, local-first Markdown editor with live inline preview, built with CodeMirror 6 and Tauri.
 
-## 功能
+Notebook Editor MD is designed to provide a focused Markdown writing experience where the line currently being edited remains as Markdown source, while inactive lines are rendered immediately.
 
-- FR-1 Live Preview：光标所在行为源码态，离开即渲染
-- FR-2 GFM 基本语法（标题/列表/引用/链接/分割线/删除线）
-- FR-3 数学公式：行内 `$…$`、块级 `$$…$$`（KaTeX，渲染缓存）
-- FR-4 代码块：Shiki 高亮 + 自定义 IDEA Darcula / Obsidian 主题、语言标签、复制按钮
-- FR-5 表格：GFM 管道表格，支持对齐语法
-- FR-6 图片 / 任务列表（可点勾选回写源码）
-- FR-7 文件管理：新建/打开/保存/另存为、500ms 防抖自动保存、脏标记、最近文件
-- FR-8 撤销重做、Ctrl+B/I/K 快捷键
-- FR-9 导出单文件 HTML
+Unlike traditional split-pane Markdown editors, the goal is to keep writing and previewing in the same document surface.
 
-## 运行
+> Early-stage project — actively developed and open to feedback, issues, and contributions.
+
+## Why Notebook Editor MD?
+
+Many Markdown editors either use a separate preview panel or hide most Markdown syntax completely.
+
+Notebook Editor MD explores a different editing model:
+
+- Keep the active line editable as raw Markdown.
+- Render inactive content directly inside the editor.
+- Keep documents as standard `.md` files.
+- Work locally without requiring a cloud account or proprietary storage format.
+- Provide a native desktop experience through Tauri.
+
+The project aims to provide a small, hackable open-source foundation for experimenting with modern Markdown editing experiences based on CodeMirror 6.
+
+## Features
+
+### Live Markdown Preview
+
+The line containing the cursor stays in source mode. When the cursor leaves the line, supported Markdown elements are rendered directly inside the editor.
+
+Supported syntax includes:
+
+- Headings
+- Bold and italic text
+- Strikethrough
+- Blockquotes
+- Ordered and unordered lists
+- Links
+- Horizontal rules
+- Inline code
+- GFM tables
+- Task lists
+
+### Mathematics
+
+Supports KaTeX rendering for:
+
+- Inline math: `$x^2$`
+- Block math: `$$...$$`
+
+Math rendering is cached to reduce unnecessary rerendering.
+
+### Code Blocks
+
+Fenced and indented code blocks are rendered with Shiki syntax highlighting.
+
+Features include:
+
+- Language labels
+- Copy button
+- IDEA Darcula inspired theme
+- Obsidian inspired theme
+
+### Mermaid Diagrams
+
+Markdown documents can contain Mermaid diagrams for flowcharts and other diagrams.
+
+### Images and Task Lists
+
+Supports Markdown images and interactive GFM task lists.
+
+Task-list checkboxes can update the original Markdown source when toggled.
+
+### File Management
+
+Desktop functionality includes:
+
+- New file
+- Open file
+- Save
+- Save As
+- Automatic save with debounce
+- Dirty-state tracking
+- Recent files
+
+### Editing
+
+Common editing operations are supported, including:
+
+- Undo / Redo
+- `Ctrl+B` — Bold
+- `Ctrl+I` — Italic
+- `Ctrl+K` — Link
+
+### HTML Export
+
+Documents can be exported as standalone HTML for sharing or publishing outside the editor.
+
+## Screenshots
+
+> Screenshots and demo recordings are being prepared.
+
+Add screenshots here, for example:
+
+```text
+docs/screenshots/editor.png
+docs/screenshots/math.png
+docs/screenshots/code-block.png
+```
+
+A short GIF or video demonstrating the live-preview editing model is especially useful.
+
+## Technology
+
+Notebook Editor MD is built with:
+
+- **CodeMirror 6** — editor infrastructure
+- **TypeScript**
+- **Vite**
+- **Tauri 2 / Rust** — native desktop application
+- **markdown-it** — Markdown rendering
+- **KaTeX** — mathematical expressions
+- **Mermaid** — diagrams
+- **Shiki** — syntax highlighting
+- **Lezer Markdown** — Markdown syntax analysis
+
+## Development
+
+### Requirements
+
+For web development:
+
+- Node.js
+- npm
+
+For the desktop application:
+
+- Rust toolchain
+- Tauri 2 development dependencies
+
+### Install
 
 ```bash
+git clone https://github.com/zhulidr/notebook_editor_md.git
+cd notebook_editor_md
 npm install
-npm run dev      # 浏览器打开 http://localhost:5173
-npm run build    # 类型检查 + 打包到 dist/
 ```
 
-桌面版（Tauri）：
+### Run the Web Version
 
 ```bash
-cd src-tauri
-cargo build           # 调试构建
-tauri build --debug --no-bundle  # 嵌入 dist 的调试 exe
+npm run dev
 ```
 
-## 技术栈
+The development server runs at:
 
-- **前端**：React + TypeScript + Vite + CodeMirror 6
-- **桌面**：Tauri 2 (Rust)
-- **高亮**：Shiki（IDEA Darcula / Obsidian 主题）
-- **渲染**：KaTeX 公式、Mermaid 图表、GFM 表格/任务列表
+```text
+http://localhost:5173
+```
+
+### Build
+
+```bash
+npm run build
+```
+
+### Build the Desktop Version
+
+```bash
+npm run build
+cd src-tauri
+cargo build
+```
+
+For a Tauri debug build:
+
+```bash
+tauri build --debug --no-bundle
+```
+
+## Testing
+
+The project contains tests for important parts of the Markdown editing and rendering pipeline, including:
+
+- Live-preview decorations
+- Markdown tables
+- Math rendering
+- Rendering pipeline
+- Platform filesystem abstraction
+- Math rendering cache
+
+Run tests with:
+
+```bash
+npx vitest run
+```
+
+See [TESTPLAN.md](TESTPLAN.md) for the current testing strategy.
+
+## Project Status
+
+Notebook Editor MD is currently in early development.
+
+Current priorities include:
+
+- improving Markdown compatibility
+- improving editor performance on large documents
+- expanding automated tests
+- improving desktop packaging
+- improving accessibility and keyboard workflows
+- supporting more operating systems
+- improving documentation
+- gathering feedback from real users
+
+## Roadmap
+
+Planned areas of development include:
+
+- [ ] Stable Windows release
+- [ ] macOS and Linux packaging
+- [ ] Improved image handling
+- [ ] Drag-and-drop files and images
+- [ ] Search and replace improvements
+- [ ] Configurable editor themes
+- [ ] Performance optimization for large Markdown files
+- [ ] More comprehensive automated tests
+- [ ] CI builds and automated releases
+- [ ] Plugin/extensibility exploration
+
+Suggestions are welcome through GitHub Issues.
+
+## Contributing
+
+Contributions are welcome.
+
+You can help by:
+
+- reporting bugs
+- proposing features
+- improving documentation
+- testing the editor on different operating systems
+- improving Markdown compatibility
+- submitting pull requests
+
+For larger changes, please open an issue first so the implementation can be discussed.
+
+## Open Source
+
+Notebook Editor MD is intended to remain an open-source project and use standard Markdown files rather than a proprietary document format.
+
+The goal is to create a useful Markdown editor while also providing an accessible CodeMirror 6 + Tauri reference implementation for developers interested in building modern Markdown editing experiences.
+
+## Maintainer
+
+Notebook Editor MD is currently primarily maintained by [@zhulidr](https://github.com/zhulidr).
+
+Maintenance work includes feature development, bug fixing, test coverage, releases, issue triage, and reviewing community contributions.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
