@@ -1,15 +1,15 @@
 import 'katex/dist/katex.min.css';
 import './styles/editor.css';
 import { createEditor } from './editor/cm';
-import { bindView, wireUI, updateStatusbar } from './app/app';
+import { activateAppView, bindView, wireUI, updateStatusbar } from './app/app';
 import { initTheme } from './editor/cm/theme';
 import { initSettings } from './editor/cm/settings';
 import { initOutline } from './app/outline';
 import { registerFirstTab } from './app/tabs';
-import { getFs, setActiveFs } from './platform';
-import { insertTable } from './editor/cm/state';
+import { getFs, isTauri, setActiveFs } from './platform';
 import { listen } from '@tauri-apps/api/event';
-import type { EditorView } from '@codemirror/view';
+import { initPanes } from './app/panes';
+import { openCommandPalette } from './app/command-palette';
 
 const editorEl = document.getElementById('editor')!;
 const view = createEditor(editorEl, '');
@@ -20,10 +20,11 @@ registerFirstTab(view, '未命名.md', null);
 initTheme(view);
 initSettings();
 initOutline(view);
+initPanes(view, activateAppView);
 wireUI();
 updateStatusbar();
 
-// 监听 Rust 端键盘钩子 emit 的 "ctrl-p" 事件（钩子已阻止 WebView2 打印对话框）
-listen('ctrl-p', () => {
-  insertTable(view as EditorView);
-});
+// Windows 桌面端由 Rust 钩子拦截 WebView2 的打印快捷键，再交给统一命令面板。
+if (isTauri()) {
+  void listen('ctrl-p', () => openCommandPalette());
+}

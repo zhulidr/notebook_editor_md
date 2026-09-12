@@ -1,55 +1,74 @@
-// 大纲目录（候选 M4）：从文档抽取标题，点击跳转
+// 当前活动编辑区的大纲导航。
 import { EditorView } from '@codemirror/view';
 
 interface Heading { level: number; text: string; pos: number; }
 
 let view: EditorView;
 let panel: HTMLElement;
-let visible = false;
+let list: HTMLElement;
+let visible = true;
 
-export function initOutline(v: EditorView): void {
-  view = v;
+export function initOutline(initialView: EditorView): void {
+  view = initialView;
   panel = document.getElementById('outline') as HTMLElement;
+  list = document.getElementById('outline-list') as HTMLElement;
+  panel.classList.toggle('open', visible);
+  document.getElementById('app')?.classList.toggle('outline-open', visible);
+}
+
+export function setOutlineView(nextView: EditorView): void {
+  view = nextView;
+  refreshOutline();
 }
 
 export function toggleOutline(): void {
   visible = !visible;
   panel.classList.toggle('open', visible);
+  document.getElementById('app')?.classList.toggle('outline-open', visible);
   if (visible) refreshOutline();
 }
 
 export function refreshOutline(): void {
   if (!view || !visible) return;
-  const heads = buildOutline(view);
-  panel.innerHTML = '';
-  if (!heads.length) {
-    panel.innerHTML = '<p class="empty">无标题</p>';
+  const headings = buildOutline(view);
+  const cursor = view.state.selection.main.head;
+  let currentIndex = -1;
+  headings.forEach((heading, index) => {
+    if (heading.pos <= cursor) currentIndex = index;
+  });
+  list.innerHTML = '';
+  if (!headings.length) {
+    list.innerHTML = '<p class="empty">当前文档没有标题</p>';
     return;
   }
-  for (const h of heads) {
-    const el = document.createElement('div');
-    el.className = `outline-item outline-h${h.level}`;
-    el.textContent = h.text || '(空标题)';
-    el.title = h.text;
-    el.onclick = () => {
+  headings.forEach((heading, index) => {
+    const item = document.createElement('div');
+    item.className = `outline-item outline-h${heading.level}${index === currentIndex ? ' current' : ''}`;
+    item.textContent = heading.text || '(空标题)';
+    item.title = heading.text;
+    item.onclick = () => {
       view.dispatch({
-        selection: { anchor: h.pos },
-        effects: EditorView.scrollIntoView(h.pos, { y: 'center' }),
+        selection: { anchor: heading.pos },
+        effects: EditorView.scrollIntoView(heading.pos, { y: 'center' }),
       });
       view.focus();
+      refreshOutline();
     };
-    panel.appendChild(el);
-  }
+    list.appendChild(item);
+  });
 }
 
-function buildOutline(v: EditorView): Heading[] {
-  const heads: Heading[] = [];
-  const doc = v.state.doc;
-  // 用 doc.line 获取行起始偏移，正确处理 CRLF（手动累加 line.length+1 会偏）
-  for (let n = 1; n <= doc.lines; n++) {
-    const line = doc.line(n);
-    const m = line.text.match(/^(#{1,6})\s+(.*)$/);
-    if (m) heads.push({ level: m[1].length, text: m[2].replace(/[*`]/g, '').trim(), pos: line.from });
+function buildOutline(editorView: EditorView): Heading[] {
+  const headings: Heading[] = [];
+  const doc = editorView.state.doc;
+  for (let lineNumber = 1; lineNumber <= doc.lines; lineNumber++) {
+    const line = doc.line(lineNumber);
+    const match = line.text.match(/^(#{1,6})\s+(.*)$/);
+    if (match) headings.push({
+      level: match[1].length,
+      text: match[2].replace(/[*`]/g, '').trim(),
+      pos: line.from,
+    });
   }
-  return heads;
+  return headings;
 }

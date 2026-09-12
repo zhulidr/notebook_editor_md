@@ -11,6 +11,20 @@ const registry = new Map<string, Entry>();
 let seq = 0;
 const key = (name: string) => `${++seq}:${name}`;
 
+function wasPickerCancelled(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'name' in error
+    && (error as { name?: unknown }).name === 'AbortError';
+}
+
+async function pickOrNull<T>(pick: () => Promise<T>): Promise<T | null> {
+  try {
+    return await pick();
+  } catch (error) {
+    if (wasPickerCancelled(error)) return null;
+    throw error;
+  }
+}
+
 async function* iterDir(d: FileSystemDirectoryHandle): AsyncGenerator<[string, FileSystemHandle]> {
   // @ts-expect-error entries() exists on modern browsers
   for await (const [name, handle] of d.entries()) yield [name, handle] as [string, FileSystemHandle];
@@ -37,7 +51,14 @@ export const webFs: FileSystem = {
     if (!e || e.kind !== 'dir') return [];
     const out: FileEntry[] = [];
     for await (const [name, handle] of iterDir(e.handle as FileSystemDirectoryHandle)) {
-      out.push({ name, path: `${path}/${name}`, isDir: handle.kind === 'directory' });
+      const childPath = `${path}/${name}`;
+      const isDir = handle.kind === 'directory';
+      // 工作区扫描会继续读取子目录/文件；必须登记每一级句柄，而不只是返回展示路径。
+      registry.set(childPath, {
+        kind: isDir ? 'dir' : 'file',
+        handle: isDir ? handle as FileSystemDirectoryHandle : handle as FileSystemFileHandle,
+      });
+      out.push({ name, path: childPath, isDir });
     }
     return out;
   },
@@ -49,7 +70,7 @@ export const webFs: FileSystem = {
 
   async pickFile() {
     const w = window as unknown as { showOpenFilePicker: (o: unknown) => Promise<FileSystemFileHandle> };
-    const handle = await w.showOpenFilePicker({
+    const handle = await pickOrNull(() => w.showOpenFilePicker({
       types: [{
         description: 'Markdown / Canvas',
         accept: {
@@ -57,7 +78,8 @@ export const webFs: FileSystem = {
           'application/json': ['.canvas'],
         },
       }],
-    });
+    }));
+    if (!handle) return null;
     const id = key(handle.name);
     registry.set(id, { kind: 'file', handle });
     return id;
@@ -65,7 +87,8 @@ export const webFs: FileSystem = {
 
   async pickFolder() {
     const w = window as unknown as { showDirectoryPicker: () => Promise<FileSystemDirectoryHandle> };
-    const handle = await w.showDirectoryPicker();
+    const handle = await pickOrNull(() => w.showDirectoryPicker());
+    if (!handle) return null;
     const id = key(handle.name);
     registry.set(id, { kind: 'dir', handle });
     return id;
@@ -73,10 +96,11 @@ export const webFs: FileSystem = {
 
   async pickSavePath(defaultName) {
     const w = window as unknown as { showSaveFilePicker: (o: unknown) => Promise<FileSystemFileHandle> };
-    const handle = await w.showSaveFilePicker({
+    const handle = await pickOrNull(() => w.showSaveFilePicker({
       suggestedName: defaultName,
       types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md', '.markdown'] } }],
-    });
+    }));
+    if (!handle) return null;
     const id = key(handle.name);
     registry.set(id, { kind: 'file', handle });
     return id;

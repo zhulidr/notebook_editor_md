@@ -45,20 +45,19 @@ export class DataviewWidget extends WidgetType {
   constructor(
     readonly query: string,
     readonly from: number,
-    readonly view: EditorView,
   ) { super(); }
 
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const widget = this;
     const wrap = document.createElement('div');
     wrap.className = 'md-dataview';
     wrap.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      widget.view.dispatch({ selection: { anchor: widget.from } });
-      widget.view.focus();
+      view.dispatch({ selection: { anchor: widget.from } });
+      view.focus();
     });
 
-    const src = this.view.state.doc.toString();
+    const src = view.state.doc.toString();
     const fm = parseFrontmatter(src);
     const headings: Heading[] = [];
     for (const line of src.split(/\r?\n/)) {

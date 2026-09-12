@@ -1,7 +1,7 @@
 // 链接 Widget（需求 FR-1.3 隐藏标记符 + FR-2.4 点击打开外部链接）
 // 锚点链接（#开头）在文档内滚动，不打开外部页面。
 import { WidgetType } from '@codemirror/view';
-import { openExternal } from '../../platform';
+import { isSafeExternalUrl, openExternal } from '../../platform';
 
 export class LinkWidget extends WidgetType {
   constructor(readonly text: string, readonly url: string) { super(); }
@@ -30,6 +30,7 @@ export class LinkWidget extends WidgetType {
         }
         return;
       }
+      if (!isSafeExternalUrl(u)) return;
       void openExternal(u);
     };
     return a;

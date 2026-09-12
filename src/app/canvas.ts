@@ -127,6 +127,23 @@ export function renderCanvas(json: string, editorEl: HTMLElement, view: EditorVi
   // 拖动节点
   let dragEl: HTMLElement | null = null;
   let dx = 0, dy = 0;
+  function persistNodePosition(node: HTMLElement): void {
+    const id = node.dataset.id;
+    const source = nodes.find((item) => item.id === id);
+    if (!source) return;
+    const x = Math.round(Number.parseFloat(node.style.left));
+    const y = Math.round(Number.parseFloat(node.style.top));
+    if (!Number.isFinite(x) || !Number.isFinite(y) || (source.x === x && source.y === y)) return;
+    source.x = x;
+    source.y = y;
+    data.nodes = nodes;
+    // Canvas 是 JSON 文档；拖动必须回写 EditorState，才能沿用现有脏标记、
+    // 自动保存和分屏同步，而不是仅留下临时 DOM 位置。
+    const next = JSON.stringify(data, null, 2);
+    if (view.state.doc.toString() !== next) {
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: next } });
+    }
+  }
   board.addEventListener('mousedown', (e) => {
     const node = (e.target as HTMLElement).closest('.canvas-node') as HTMLElement | null;
     if (!node || (e.target as HTMLElement).closest('.canvas-node-body')) return;
@@ -144,7 +161,13 @@ export function renderCanvas(json: string, editorEl: HTMLElement, view: EditorVi
     dragEl.style.top = `${e.clientY - br.top - dy}px`;
     drawEdges();
   };
-  onUp = () => { dragEl = null; };
+  onUp = () => {
+    const dropped = dragEl;
+    dragEl = null;
+    if (!dropped) return;
+    dropped.style.zIndex = '';
+    persistNodePosition(dropped);
+  };
   window.addEventListener('mousemove', onMove);
   window.addEventListener('mouseup', onUp);
 

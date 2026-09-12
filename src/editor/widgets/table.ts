@@ -20,6 +20,20 @@ function lineRanges(src: string, base: number): LineRange[] {
   return out;
 }
 
+function isEscapedPipe(line: string, index: number): boolean {
+  let slashCount = 0;
+  for (let i = index - 1; i >= 0 && line[i] === '\\'; i--) slashCount++;
+  return slashCount % 2 === 1;
+}
+
+function unescapeTablePipes(text: string): string {
+  return text.replace(/\\\|/g, '|');
+}
+
+function escapeTablePipes(text: string): string {
+  return text.replace(/\|/g, '\\|');
+}
+
 function parseRow(line: string, lineAbsStart: number): CellSpan[] {
   const cells: CellSpan[] = [];
   const n = line.length;
@@ -28,7 +42,7 @@ function parseRow(line: string, lineAbsStart: number): CellSpan[] {
   if (i < n && line[i] === '|') i++;
   let cellStart = i;
   while (i <= n) {
-    if (i === n || line[i] === '|') {
+    if (i === n || (line[i] === '|' && !isEscapedPipe(line, i))) {
       const raw = line.slice(cellStart, i);
       if (raw !== '') { // 始终创建 cell（包括只有空格的空单元格），使空单元格可编辑
         const trimmed = raw.trim();
@@ -52,7 +66,7 @@ function parseRow(line: string, lineAbsStart: number): CellSpan[] {
 }
 
 function splitRow(line: string): string[] {
-  return line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(s => s.trim());
+  return parseRow(line, 0).map((cell) => unescapeTablePipes(cell.text));
 }
 
 function alignOf(cell: string): string {
@@ -65,19 +79,39 @@ function alignOf(cell: string): string {
 }
 
 function inlineHtml(text: string): string {
-  // 单元格内支持行内代码 `…` 与行内公式 $…$（FR-5.4）；粗体/斜体内容需转义防 XSS
-  let out = text.replace(/`([^`]+)`/g, (_, c) => `<code>${esc(c)}</code>`);
-  out = out.replace(/\$([^\$\n]+?)\$/g, (_, t) => {
+  // 单元格内容来自 Markdown 文本，先完整转义，再只由我们自己生成允许的格式标签。
+  // 这避免 `<img onerror=…>` 之类内容通过 td.innerHTML 执行。
+  let out = esc(text);
+  // 单元格内支持行内代码 `…` 与行内公式 $…$（FR-5.4）。
+  let code = out.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
+  code = code.replace(/\$([^\$\n]+?)\$/g, (_, t) => {
     try { return katex.renderToString(t, { throwOnError: false }); }
-    catch { return esc(t); }
+    catch { return t; }
   });
-  out = out.replace(/\*\*([^*]+)\*\*/g, (_, c) => `<strong>${esc(c)}</strong>`)
-           .replace(/\*([^*]+)\*/g, (_, c) => `<em>${esc(c)}</em>`);
-  return out;
+  return code.replace(/\*\*([^*]+)\*\*/g, (_, c) => `<strong>${c}</strong>`)
+    .replace(/\*([^*]+)\*/g, (_, c) => `<em>${c}</em>`);
 }
 
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function editableCells(root: ParentNode): HTMLElement[] {
+  return Array.from(root.querySelectorAll('th, td')).filter(
+    (element) => (element as HTMLElement).contentEditable === 'true',
+  ) as HTMLElement[];
+}
+
+function focusCellAtEnd(cell: HTMLElement | undefined): void {
+  if (!cell) return;
+  cell.focus();
+  const selection = cell.ownerDocument.getSelection();
+  if (!selection) return;
+  const range = cell.ownerDocument.createRange();
+  range.selectNodeContents(cell);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
 }
 
 // 保留原文本的外层 Markdown 行内标记（**b** / *i* / `c` / $m$），套用到编辑后的纯文本上。
@@ -103,17 +137,16 @@ export class TableWidget extends WidgetType {
   constructor(
     readonly src: string,
     readonly from: number,
-    readonly view: EditorView,
   ) { super(); }
 
   // FR-5.5：编辑后的单元格内容回写源码；保留原 Markdown 行内标记，避免反复编辑后标记被剥光
   // rowIdx 为表格内行索引（0=表头，1=分隔线，2+=数据行），用于 commit 时从当前文档重新定位偏移
-  private commit(cell: HTMLElement, rowIdx: number, colIdx: number, origText: string): void {
+  private commit(view: EditorView, cell: HTMLElement, rowIdx: number, colIdx: number, origText: string): void {
     const raw = cell.innerText ?? '';
     const next = raw.trim();
-    if (next === origText) return;
+    if (next === unescapeTablePipes(origText)) return;
     // 从当前文档重新定位单元格偏移（用户编辑其他单元格后，widget 创建时的 span.from/to 已失效）
-    const doc = this.view.state.doc;
+    const doc = view.state.doc;
     const startLine = doc.lineAt(this.from);
     const lineCount = this.src.split('\n').filter((l) => l.trim() !== '').length;
     let collected = 0;
@@ -129,11 +162,11 @@ export class TableWidget extends WidgetType {
     const spans = parseRow(targetLine.text, targetLine.from);
     const span = spans[colIdx];
     if (!span || span.from >= span.to) return;
-    const insert = preserveMarkers(origText, next);
-    this.view.dispatch({ changes: { from: span.from, to: span.to, insert } });
+    const insert = escapeTablePipes(preserveMarkers(origText, next));
+    view.dispatch({ changes: { from: span.from, to: span.to, insert } });
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const widget = this;
     const lines = lineRanges(this.src, this.from).filter((l) => l.text.trim() !== '');
     const table = document.createElement('table');
@@ -152,6 +185,7 @@ export class TableWidget extends WidgetType {
       cell.tabIndex = 0;
       const span = spans[colIdx];
       const origText = span.text;
+      let tabCommitHandled = false;
       // capture 阶段拦截，确保在 CodeMirror keymap 之前处理 Tab
       cell.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
@@ -164,20 +198,30 @@ export class TableWidget extends WidgetType {
         if (e.key === 'Tab') {
           e.preventDefault();
           e.stopImmediatePropagation();
-          // 先移动焦点再提交（blur 会触发 commit）
-          const allCells = Array.from(table.querySelectorAll('th, td')).filter(
-            (el) => (el as HTMLElement).contentEditable === 'true'
-          ) as HTMLElement[];
+          const allCells = editableCells(table);
           const cellIdx = allCells.indexOf(cell);
           const nextIdx = e.shiftKey ? cellIdx - 1 : cellIdx + 1;
-          if (nextIdx >= 0 && nextIdx < allCells.length) {
-            (allCells[nextIdx] as HTMLElement).focus();
-          } else {
+          if (nextIdx < 0) {
             cell.blur();
+            return;
           }
+
+          // 先提交当前单元格。提交会同步重建 TableWidget，因此不能先聚焦旧 DOM 中的下一格。
+          tabCommitHandled = true;
+          widget.commit(view, cell, rowIdx, colIdx, origText);
+
+          // 从最后一格继续 Tab 时新增一行，随后按行优先进入新行首列。
+          if (nextIdx >= allCells.length) appendEmptyRow();
+          focusRenderedCell(nextIdx);
         }
       }, true);
-      cell.addEventListener('blur', () => widget.commit(cell, rowIdx, colIdx, origText));
+      cell.addEventListener('blur', () => {
+        if (tabCommitHandled) {
+          tabCommitHandled = false;
+          return;
+        }
+        widget.commit(view, cell, rowIdx, colIdx, origText);
+      });
     }
 
     const thead = document.createElement('thead');
@@ -210,7 +254,7 @@ export class TableWidget extends WidgetType {
     table.addEventListener('dblclick', (e) => {
       const target = e.target as HTMLElement;
       const cell = target.closest('th, td');
-      if (!cell || this.view.state.doc.length === 0) return;
+      if (!cell || view.state.doc.length === 0) return;
       const rect = (cell as HTMLElement).getBoundingClientRect();
       // 用子元素行偏移近似：直接定位到该行源码
       const rowEl = cell.parentElement as HTMLElement;
@@ -224,9 +268,9 @@ export class TableWidget extends WidgetType {
         const colIdx = Array.prototype.indexOf.call(rowEl.children, cell);
         const span = spans[colIdx];
         if (span) {
-          const pos = Math.min(span.from + (span.to - span.from) / 2, this.view.state.doc.length);
-          this.view.dispatch({ selection: { anchor: Math.floor(pos) } });
-          this.view.focus();
+          const pos = Math.min(span.from + (span.to - span.from) / 2, view.state.doc.length);
+          view.dispatch({ selection: { anchor: Math.floor(pos) } });
+          view.focus();
         }
       }
     });
@@ -234,13 +278,14 @@ export class TableWidget extends WidgetType {
     // 添加行/列按钮：悬浮时显示，点击添加新行/列
     const wrapper = document.createElement('div');
     wrapper.className = 'md-table-wrapper';
+    wrapper.dataset.tableFrom = String(widget.from);
     wrapper.appendChild(table);
 
     const colCount = splitRow(lines[0].text).length;
 
     // 从编辑器实时读取表格实际源码（commit 后 widget.src 过期，用行数定位实际范围）
     function readCurTable(): { src: string; end: number } {
-      const doc = widget.view.state.doc;
+      const doc = view.state.doc;
       const startLine = doc.lineAt(widget.from);
       const lineCount = widget.src.split('\n').filter((l) => l.trim() !== '').length;
       let end = widget.from;
@@ -254,6 +299,21 @@ export class TableWidget extends WidgetType {
       return { src: doc.sliceString(widget.from, end), end };
     }
 
+    function appendEmptyRow(): void {
+      const { end } = readCurTable();
+      const newRow = '|' + '  |'.repeat(colCount);
+      view.dispatch({ changes: { from: end, insert: '\n' + newRow } });
+    }
+
+    function focusRenderedCell(index: number): void {
+      // 等本次 keydown 与 CodeMirror 的 DOM 同步完成，再从新 widget 中找目标格。
+      queueMicrotask(() => {
+        const currentWrapper = Array.from(view.dom.querySelectorAll<HTMLElement>('.md-table-wrapper'))
+          .find((element) => element.dataset.tableFrom === String(widget.from));
+        if (currentWrapper) focusCellAtEnd(editableCells(currentWrapper)[index]);
+      });
+    }
+
     // 添加行按钮：表格底部居中，悬浮显示 CSS 三角形
     const addRowBtn = document.createElement('div');
     addRowBtn.className = 'md-table-add md-table-add-row';
@@ -264,9 +324,7 @@ export class TableWidget extends WidgetType {
       // 先提交当前编辑的单元格（blur 触发 commit，同步 dispatch 更新文档）
       const focused = document.activeElement as HTMLElement;
       if (focused && focused.contentEditable === 'true') focused.blur();
-      const { end } = readCurTable();
-      const newRow = '|' + '  |'.repeat(colCount);
-      widget.view.dispatch({ changes: { from: end, insert: '\n' + newRow } });
+      appendEmptyRow();
     });
     wrapper.appendChild(addRowBtn);
 
@@ -289,7 +347,7 @@ export class TableWidget extends WidgetType {
         const newCell = isSeparator ? ' --- |' : '  |';
         return line.slice(0, lastPipe + 1) + newCell + line.slice(lastPipe + 1);
       }).join('\n');
-      widget.view.dispatch({ changes: { from: widget.from, to: end, insert: newSrc } });
+      view.dispatch({ changes: { from: widget.from, to: end, insert: newSrc } });
     });
     wrapper.appendChild(addColBtn);
 

@@ -6,10 +6,9 @@ export class CheckboxWidget extends WidgetType {
     readonly from: number,
     readonly to: number,
     readonly checked: boolean,
-    readonly view: EditorView,
   ) { super(); }
 
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const box = document.createElement('input');
     box.type = 'checkbox';
     box.className = 'md-checkbox';
@@ -17,7 +16,7 @@ export class CheckboxWidget extends WidgetType {
     box.addEventListener('click', (e) => {
       e.stopPropagation();
       const next = this.checked ? '[ ]' : '[x]';
-      this.view.dispatch({ changes: { from: this.from, to: this.to, insert: next } });
+      view.dispatch({ changes: { from: this.from, to: this.to, insert: next } });
     });
     return box;
   }

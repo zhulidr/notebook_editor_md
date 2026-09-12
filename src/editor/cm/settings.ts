@@ -35,6 +35,8 @@ function apply(): void {
   root.style.setProperty('--editor-line-height', `${Math.round(currentSize * 1.7)}px`);
   const label = document.getElementById('st-font');
   if (label) label.textContent = `${fam.label} · ${currentSize}px`;
+  // 所有编辑器视图（含分屏）监听该事件后 requestMeasure，避免 gutter 继续使用旧行高。
+  window.dispatchEvent(new Event('md-editor:measure'));
 }
 
 function applyCodeBg(): void {

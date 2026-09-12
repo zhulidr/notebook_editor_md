@@ -3,7 +3,9 @@
 import { WidgetType, type EditorView } from '@codemirror/view';
 import mermaid from 'mermaid';
 
-mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+// 图表内容来自 Markdown 文件。strict 会编码 HTML 并禁用图内点击链接，避免图表
+// 成为绕过 Markdown HTML 白名单的第二条注入路径。
+mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'strict' });
 
 let seq = 0;
 
@@ -11,10 +13,9 @@ export class MermaidWidget extends WidgetType {
   constructor(
     readonly src: string,
     readonly from: number,
-    readonly view: EditorView,
   ) { super(); }
 
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const widget = this;
     const wrap = document.createElement('div');
     wrap.className = 'md-mermaid';
@@ -28,8 +29,8 @@ export class MermaidWidget extends WidgetType {
     // 点击回到源码（FR-1.5）
     wrap.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      widget.view.dispatch({ selection: { anchor: widget.from } });
-      widget.view.focus();
+      view.dispatch({ selection: { anchor: widget.from } });
+      view.focus();
     });
 
     void (async () => {

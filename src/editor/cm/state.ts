@@ -1,12 +1,12 @@
 // 编辑器状态工厂（多标签共用同一 EditorView，每个标签一个 EditorState）
 // 拆出此文件避免 tabs ↔ editor 循环依赖：tabs 建新状态、editor 注册编辑回调。
 import { EditorState, EditorSelection, Prec } from '@codemirror/state';
-import { EditorView, keymap, lineNumbers, highlightActiveLine } from '@codemirror/view';
+import { EditorView, keymap, lineNumbers, highlightActiveLine, type ViewUpdate } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { searchKeymap, highlightSelectionMatches, openSearchPanel, search } from '@codemirror/search';
 import { markdownLang } from './markdown-lang';
 import { themeExtension } from './theme';
-import { livePreview, codeTokenField, viewCapture, treeWatcher } from './live-preview';
+import { livePreview, codeTokenField, documentIdentity, fontMetricsExtension, viewCapture, treeWatcher } from './live-preview';
 
 // FR-8.2 行内标记快捷键
 function wrap(view: EditorView, before: string, after = before): boolean {
@@ -149,18 +149,17 @@ const mdKeymap = [
   { key: 'Mod-b', run: (v: EditorView) => wrap(v, '**') },
   { key: 'Mod-i', run: (v: EditorView) => wrap(v, '*') },
   { key: 'Mod-k', run: (v: EditorView) => { v.dispatch(v.state.replaceSelection('[链接文本](url)')); return true; } },
-  { key: 'Mod-p', run: insertTable }, // 插入表格（覆盖浏览器打印快捷键）
   { key: 'Mod-f', run: openSearchPanel }, // FR-8.4 查找替换
 ];
 
 // 编辑回调：由入口装配（多标签路由用）
-export type EditHandler = (view: EditorView, docChanged: boolean, selectionSet: boolean) => void;
+export type EditHandler = (update: ViewUpdate) => void;
 let editHandler: EditHandler | null = null;
 export function setEditHandler(fn: EditHandler): void { editHandler = fn; }
 
-// 标签切换抑制：view.setState 会以 docChanged 触发一次 update，需跳过编辑回调（tabs.activate 时置位）
-let suppressNextUpdate = false;
-export function setSuppressNextUpdate(v: boolean): void { suppressNextUpdate = v; }
+// 标签切换与分屏镜像会产生内部更新；按视图抑制一次，避免误标脏或循环同步。
+const suppressedViews = new WeakSet<EditorView>();
+export function suppressNextUpdateFor(view: EditorView): void { suppressedViews.add(view); }
 
 export function createEditorState(doc: string): EditorState {
   return EditorState.create({
@@ -175,14 +174,16 @@ export function createEditorState(doc: string): EditorState {
       Prec.highest(keymap.of(mdKeymap)),
       markdownLang(),
       themeExtension(),
+      fontMetricsExtension(),
+      documentIdentity,
       viewCapture,
       treeWatcher,
       livePreview,
       codeTokenField,
       EditorView.lineWrapping,
       EditorView.updateListener.of((vu) => {
-        if (suppressNextUpdate) { suppressNextUpdate = false; return; }
-        if (editHandler) editHandler(vu.view, vu.docChanged, vu.selectionSet);
+        if (suppressedViews.delete(vu.view)) return;
+        if (editHandler) editHandler(vu);
       }),
     ],
   });

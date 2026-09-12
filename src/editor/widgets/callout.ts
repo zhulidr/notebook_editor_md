@@ -10,11 +10,10 @@ export class CalloutHeaderWidget extends WidgetType {
     readonly collapsible: boolean,
     readonly collapsed: boolean,
     readonly blockKey: string,
-    readonly view: EditorView,
-    readonly onToggle: (key: string) => void,
+    readonly onToggle: (key: string, view: EditorView) => void,
   ) { super(); }
 
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const wrap = document.createElement('div');
     wrap.className = 'md-callout-header';
     wrap.dataset.type = this.type.toLowerCase();
@@ -25,7 +24,7 @@ export class CalloutHeaderWidget extends WidgetType {
     if (this.collapsible) {
       toggle.onclick = (e) => {
         e.stopPropagation();
-        this.onToggle(this.blockKey);
+        this.onToggle(this.blockKey, view);
       };
     }
 
