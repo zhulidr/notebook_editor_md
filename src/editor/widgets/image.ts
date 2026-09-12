@@ -7,16 +7,15 @@ export class ImageWidget extends WidgetType {
     readonly alt: string,
     readonly url: string,
     readonly from: number,
-    readonly view: EditorView,
   ) { super(); }
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const widget = this;
     const wrap = document.createElement('span');
     wrap.className = 'md-image';
     wrap.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      widget.view.dispatch({ selection: { anchor: widget.from } });
-      widget.view.focus();
+      view.dispatch({ selection: { anchor: widget.from } });
+      view.focus();
     });
     const img = document.createElement('img');
     img.src = this.url;

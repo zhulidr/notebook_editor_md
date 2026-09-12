@@ -3,7 +3,7 @@
 import type { EditorView } from '@codemirror/view';
 import { createEditor as makeEditor, createEditorState, setEditHandler } from './state';
 import { scheduleAutosave } from '../../app/autosave';
-import { setCurrentDirty, syncCurrentState } from '../../app/tabs';
+import { currentTab, setViewDirty, syncViewUpdate, tabForView } from '../../app/tabs';
 import { updateStatusbar } from '../../app/app';
 import { refreshOutline } from '../../app/outline';
 
@@ -12,14 +12,14 @@ export type { EditHandler } from './state';
 
 // 注册编辑回调：状态同步/脏标记/自动保存/大纲/状态栏（由 createEditorState 内 updateListener 触发）
 export function createEditor(parent: HTMLElement, doc: string): EditorView {
-  setEditHandler((view, docChanged, selectionSet) => {
-    syncCurrentState(view.state);
-    if (docChanged) {
-      setCurrentDirty(true);
-      scheduleAutosave(view);
-      refreshOutline();
+  setEditHandler((update) => {
+    syncViewUpdate(update);
+    if (update.docChanged) {
+      setViewDirty(update.view, true);
+      scheduleAutosave(update.view);
+      if (tabForView(update.view)?.id === currentTab()?.id) refreshOutline();
     }
-    if (docChanged || selectionSet) updateStatusbar();
+    if (update.docChanged || update.selectionSet) updateStatusbar();
   });
   return makeEditor(parent, doc);
 }

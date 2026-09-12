@@ -21,6 +21,8 @@ The following capabilities are implemented in the current source tree:
 - **Shiki syntax highlighting** for fenced and indented code blocks, with IDEA Darcula and Obsidian-inspired themes, language labels, and copy controls.
 - **Images, HTML, callouts, and tables** rendered through editor widgets. Task-list checkboxes can write their state back to the Markdown source.
 - **Local file workflows** for new, open, save, save as, debounced automatic save, dirty-state tracking, tabs, recent files, and outline navigation.
+- **Keyboard-first command palette** on `Ctrl+P`, with fuzzy command search, fast workspace file opening, and a deliberately short default command list.
+- **Two-pane editing** with switchable left/right and top/bottom layouts. Two panes can show the same document while keeping their own cursor and scroll positions.
 - **HTML export** and a print-dialog flow for PDF output.
 - **Browser and desktop file access**: the browser build uses the File System Access API where available; the Tauri build provides native file dialogs and file commands.
 
@@ -89,6 +91,17 @@ Build the desktop application through Tauri:
 npm run tauri -- build
 ```
 
+### Create a Windows release
+
+The repository includes a Windows release workflow. First make sure the version in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` matches the intended tag. Pushing a version tag such as `v0.1.0` then runs the test suite, builds the web application and a Tauri NSIS installer, and uploads the installer to a draft GitHub Release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Review the generated draft and its installer before publishing it. The workflow does not configure Windows code signing, so downloaded builds may show the normal Windows warning for an unsigned application.
+
 The repository's `package.json` currently defines these npm scripts: `dev`, `build`, `preview`, and `tauri`. There is no `npm test` script yet.
 
 ## Testing
@@ -101,35 +114,24 @@ npx vitest run
 
 The current CI workflow uses the same command because `package.json` does not define a `test` script. `npm run build` is the TypeScript check plus Vite production build.
 
-`TESTPLAN.md` describes additional intended coverage. It should be read as a test plan, not as evidence that every listed test exists or passes today.
+## Project status
 
-## Project status and v0.1.0 readiness
+Notebook Editor MD remains an early-stage `0.1.0` project. The automated checks cover the TypeScript/Vite build and the Vitest suites, and the tag workflow is configured to produce a draft Windows installer. A draft produced by automation should not be treated as a stable release until the packaged desktop application has been smoke-tested manually.
 
-The JavaScript package, Tauri configuration, and Rust crate metadata currently contain version `0.1.0`. That metadata is not, by itself, a published release: this repository has no release/tag created as part of this documentation change.
-
-The following items still need attention before calling `v0.1.0` release-ready:
-
-- Make the full Vitest run green. In this checkout, `npx vitest run` currently fails during test collection because `localStorage` is not defined in the configured Node test environment, and one table-widget test expects a `TABLE` root while the implementation returns a wrapping `DIV`.
-- Decide whether to add an npm `test` script and align `vitest.config.ts` with the browser-facing tests; the current CI intentionally invokes Vitest directly and does not hide the failure.
-- Add or complete tests for the platform file-system layer, math cache, and other cases listed in `TESTPLAN.md`, where those cases are still missing from the tree.
-- Perform desktop smoke tests and platform packaging checks for the intended release targets. This audit verified the web build, not a native Tauri bundle.
-- Document supported operating systems, installation/distribution steps, known limitations, and a release checklist after those checks are complete.
-- Add a real product screenshot or demo only when one is available; none is currently present in the repository.
-
-Until the test and desktop validation items are resolved, this project is better described as an early-stage `0.1.0` codebase than as a confirmed `v0.1.0` release.
+`TESTPLAN.md` describes additional intended coverage. It is a test plan, not evidence that every listed scenario is automated today. No public release, download count, compatibility guarantee, or production-readiness claim is implied by the current version metadata.
 
 ## Roadmap
 
 Planned areas of development include:
 
-- [ ] Stable Windows release and documented desktop installation
+- [ ] Publish and smoke-test a stable Windows release
 - [ ] macOS and Linux packaging
 - [ ] Broader Markdown compatibility and improved image handling
 - [ ] Drag-and-drop files and images
 - [ ] Search and replace improvements
 - [ ] Configurable editor themes and accessibility workflows
 - [ ] Performance improvements for large Markdown files
-- [ ] More comprehensive automated tests and release automation
+- [ ] More comprehensive automated tests and macOS/Linux release automation
 - [ ] Exploration of plugin or other extensibility mechanisms
 
 ## Contributing

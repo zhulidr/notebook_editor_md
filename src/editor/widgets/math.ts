@@ -31,17 +31,16 @@ export class InlineMathWidget extends WidgetType {
   constructor(
     readonly tex: string,
     readonly from: number,
-    readonly view: EditorView,
   ) { super(); }
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const widget = this;
     const span = document.createElement('span');
     span.className = 'md-math-inline';
     span.innerHTML = render(this.tex, false);
     span.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      widget.view.dispatch({ selection: { anchor: widget.from } });
-      widget.view.focus();
+      view.dispatch({ selection: { anchor: widget.from } });
+      view.focus();
     });
     return span;
   }
@@ -53,17 +52,16 @@ export class BlockMathWidget extends WidgetType {
   constructor(
     readonly tex: string,
     readonly from: number,
-    readonly view: EditorView,
   ) { super(); }
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const widget = this;
     const div = document.createElement('div');
     div.className = 'md-math-block';
     div.innerHTML = render(this.tex, true);
     div.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      widget.view.dispatch({ selection: { anchor: widget.from } });
-      widget.view.focus();
+      view.dispatch({ selection: { anchor: widget.from } });
+      view.focus();
     });
     return div;
   }

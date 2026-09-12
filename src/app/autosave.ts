@@ -1,40 +1,82 @@
-// 自动保存（ARCHITECTURE.md §2 autosave.ts，需求 FR-7.2：停止输入 500ms 后触发）
+// 自动保存：每个标签独立去抖，并且同一标签的写入严格串行。
+// 这样较旧的异步写入绝不会在较新的快照之后落盘。
 import type { EditorView } from '@codemirror/view';
 import { activeFs } from '../platform';
-import { currentTab, setCurrentDirty } from './tabs';
+import { setTabDirty, tabForView, tabList, type Tab } from './tabs';
 import { toast } from './toast';
 
-let timer: ReturnType<typeof setTimeout> | null = null;
+interface AutosaveState {
+  timer?: ReturnType<typeof setTimeout>;
+  generation: number;
+  inFlight: Promise<void>;
+}
 
-// 保存快照：触发时捕获 {path, doc}，避免 500ms 内切换标签把内容写到错误路径
-let pendingSave: { path: string; doc: string } | null = null;
+const states = new Map<number, AutosaveState>();
+
+function stateFor(tab: Tab): AutosaveState {
+  let state = states.get(tab.id);
+  if (!state) {
+    state = { generation: 0, inFlight: Promise.resolve() };
+    states.set(tab.id, state);
+  }
+  return state;
+}
 
 export function scheduleAutosave(view: EditorView): void {
-  const tab = currentTab();
-  if (!tab || !tab.path) return; // 无路径不自动保存，等用户「另存为」
-  if (timer) clearTimeout(timer);
-  // 立即捕获快照：即便 500ms 内切走，保存的仍是本次编辑的文档与路径
-  pendingSave = { path: tab.path, doc: view.state.doc.toString() };
-  timer = setTimeout(async () => {
-    const save = pendingSave;
-    pendingSave = null;
-    timer = null;
-    if (!save) return;
-    try {
-      await activeFs().writeFile(save.path, save.doc);
-      // 仅当当前标签仍是保存时的标签时才清脏标记，否则切走后的脏标记由目标标签自己管理
-      const now = currentTab();
-      if (now && now.path === save.path) setCurrentDirty(false);
-    } catch (e) {
-      // FR-7.2 失败告警：脏标记保留，内容不丢
-      console.warn('自动保存失败：', e);
-      toast('自动保存失败：' + (e as Error).message);
-    }
+  const tab = tabForView(view);
+  if (!tab?.path) return;
+
+  const state = stateFor(tab);
+  if (state.timer) clearTimeout(state.timer);
+  const path = tab.path;
+  const doc = view.state.doc.toString();
+  const generation = ++state.generation;
+  state.timer = setTimeout(() => {
+    state.timer = undefined;
+    // 先等前一笔完成。若在等待期间已有更新的快照，旧快照无需写盘。
+    state.inFlight = state.inFlight.catch(() => undefined).then(async () => {
+      if (state.generation !== generation) return;
+      try {
+        await activeFs().writeFile(path, doc);
+        // 保存完成后若又有新编辑或另存为，保留脏标记，等待最新快照完成。
+        if (
+          state.generation === generation
+          && tabList().includes(tab)
+          && tab.path === path
+          && tab.state.doc.toString() === doc
+        ) {
+          setTabDirty(tab, false);
+        }
+      } catch (error) {
+        console.warn('自动保存失败：', error);
+        toast('自动保存失败：' + (error as Error).message);
+      }
+    });
   }, 500);
 }
 
-// 切换标签 / 关闭标签时调用，取消未决的自动保存（避免快照过期）
-export function cancelAutosave(): void {
-  if (timer) { clearTimeout(timer); timer = null; }
-  pendingSave = null;
+// 手动保存/另存为前先停止待执行任务，并等待已经开始的写入，避免旧路径或旧文本
+// 与用户刚触发的保存并发落盘。
+export async function pauseAutosave(tabId: number): Promise<void> {
+  const state = states.get(tabId);
+  if (!state) return;
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = undefined;
+  state.generation++;
+  await state.inFlight.catch(() => undefined);
+}
+
+export function cancelAutosave(tabId?: number): void {
+  if (tabId !== undefined) {
+    const state = states.get(tabId);
+    if (state?.timer) clearTimeout(state.timer);
+    if (state) state.generation++;
+    states.delete(tabId);
+    return;
+  }
+  states.forEach((state) => {
+    if (state.timer) clearTimeout(state.timer);
+    state.generation++;
+  });
+  states.clear();
 }

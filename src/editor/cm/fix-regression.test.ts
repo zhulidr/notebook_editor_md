@@ -255,7 +255,7 @@ describe('修复：多代码块 token 着色累积（Bug 1：codeTokenField 仅�
   });
 });
 
-describe('sanitizeHtml（XSS 消毒正则）', () => {
+describe('sanitizeHtml（XSS 白名单消毒）', () => {
   it('安全标签 <mark> 保留', () => {
     expect(sanitizeHtml('<mark>x</mark>')).toBe('<mark>x</mark>');
   });
@@ -275,6 +275,16 @@ describe('sanitizeHtml（XSS 消毒正则）', () => {
     const out = sanitizeHtml('<a href="javascript:alert(1)">x</a>');
     expect(out).not.toContain('javascript:');
     expect(out).toContain('href="#"');
+  });
+  it('无引号 javascript: 协议同样被替换', () => {
+    const out = sanitizeHtml('<a href=javascript:alert(1)>x</a>');
+    expect(out).not.toContain('javascript:');
+    expect(out).toContain('href="#"');
+  });
+  it('保留用户需要的安全颜色样式，丢弃危险 CSS', () => {
+    const out = sanitizeHtml('<span style="color: red; background-image: url(javascript:alert(1))">M</span>');
+    expect(out).toContain('color: red');
+    expect(out).not.toContain('url(');
   });
   it('data: 协议替换为 #', () => {
     const out = sanitizeHtml('<img src="data:text/html,<script>">');

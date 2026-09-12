@@ -1,7 +1,6 @@
 // Live Preview 核心（ARCHITECTURE.md §3）
 // 用 StateField 提供装饰：block 装饰（代码块/表格/块公式）只能由 StateField 给出（CM6 规则）。
-// 任务列表勾选需 EditorView：用模块级 activeView（由 viewCapture 插件写入）。
-import { RangeSetBuilder, StateField, StateEffect, type EditorState } from '@codemirror/state';
+import { Compartment, RangeSetBuilder, StateField, StateEffect, type EditorState } from '@codemirror/state';
 import { syntaxTree, ensureSyntaxTree } from '@codemirror/language';
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { InlineMathWidget, BlockMathWidget } from '../widgets/math';
@@ -20,74 +19,168 @@ import { highlightTokens, onCodeThemeChange, type TokenLine } from '../../highli
 interface Deco { from: number; to: number; dec: Decoration; }
 interface Range { from: number; to: number; }
 
-const INLINE_PARENTS = new Set(['Paragraph', 'ListItem', 'TableCell']);
+const INLINE_PARENTS = new Set([
+  'Paragraph', 'ListItem', 'TableCell', 'SetextHeading1', 'SetextHeading2',
+]);
 const VOID_HTML = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
-
-// 任务列表勾选要用 view.dispatch；StateField 拿不到 view，故用模块级引用
-let activeView: EditorView | null = null;
-export const viewCapture = ViewPlugin.fromClass(class {
-  constructor(v: EditorView) {
-    activeView = v;
-    // 注册主题变更回调：切换代码高亮主题时清空缓存并重新着色所有代码块
-    onCodeThemeChange(() => {
-      tokenizedCache.clear();
-      tokenStore.clear();
-      codeGen++;
-      if (activeView) activeView.dispatch({ effects: recompute.of() });
-    });
-  }
-  update() {}
-}, {});
 
 // 语法树异步解析完成后再算一次（避免打开文件后首屏不渲染；行内格式节点缺失时也触发）
 const recompute = StateEffect.define<void>();
+const compositionStarted = StateEffect.define<void>();
+const compositionEnded = StateEffect.define<void>();
+
+// 输入法组合期间冻结当前预览装饰。原本显示源码就继续显示源码，原本已经渲染的
+// HtmlWidget 也保持原 DOM，不在每个拼音/标点事务间来回切换。
+const compositionActive = StateField.define<boolean>({
+  create: () => false,
+  update(active, tr) {
+    if (tr.effects.some((effect) => effect.is(compositionStarted))) return true;
+    if (tr.effects.some((effect) => effect.is(compositionEnded))) return false;
+    return active;
+  },
+});
+
+// 每个标签都有稳定身份，代码着色缓存按文档隔离，避免两个分屏互相污染偏移。
+let documentSeq = 1;
+export const documentIdentity = StateField.define<number>({
+  create: () => documentSeq++,
+  update: (identity) => identity,
+});
+
+interface TokenDocumentData {
+  gen: number;
+  currentBases: Set<number>;
+  cache: Map<string, string>;
+  store: Map<number, TokenLine[]>;
+}
+
+const tokenDocuments = new Map<number, TokenDocumentData>();
+const editorViews = new Set<EditorView>();
+
+// 字号由全局 CSS 变量控制。通过一个独立 Compartment 重新配置同样的度量规则，
+// 让 CodeMirror 标记 geometryChanged 并重新计算 gutter 高度，而不是只重绘正文。
+const fontMetricsCompartment = new Compartment();
+function fontMetricsTheme() {
+  return EditorView.theme({
+    '.cm-scroller': {
+      fontSize: 'var(--editor-font-size, 15px)',
+      lineHeight: 'var(--editor-line-height, 26px)',
+      fontFamily: 'var(--editor-font-family, inherit)',
+    },
+  });
+}
+export function fontMetricsExtension() {
+  return fontMetricsCompartment.of(fontMetricsTheme());
+}
+function refreshFontMetrics(view: EditorView): void {
+  view.dispatch({ effects: fontMetricsCompartment.reconfigure(fontMetricsTheme()) });
+  view.requestMeasure();
+}
+
+function documentId(state: EditorState): number {
+  return state.field(documentIdentity, false) ?? 0;
+}
+
+function tokenData(idOrState: number | EditorState): TokenDocumentData {
+  const id = typeof idOrState === 'number' ? idOrState : documentId(idOrState);
+  let data = tokenDocuments.get(id);
+  if (!data) {
+    data = { gen: 0, currentBases: new Set(), cache: new Map(), store: new Map() };
+    tokenDocuments.set(id, data);
+  }
+  return data;
+}
+
+export const viewCapture = ViewPlugin.fromClass(class {
+  private readonly measure = () => refreshFontMetrics(this.view);
+  constructor(readonly view: EditorView) {
+    editorViews.add(view);
+    window.addEventListener('md-editor:measure', this.measure);
+  }
+  update() {}
+  destroy() {
+    editorViews.delete(this.view);
+    window.removeEventListener('md-editor:measure', this.measure);
+  }
+}, {
+  eventHandlers: {
+    compositionstart(_event, view) {
+      if (view.state.field(compositionActive, false) !== true) {
+        view.dispatch({ effects: compositionStarted.of() });
+      }
+    },
+    compositionend(_event, view) {
+      // 等浏览器完成 composition 的 DOM/选区同步后解除冻结并统一重算一次。
+      setTimeout(() => {
+        if (editorViews.has(view) && !view.compositionStarted) {
+          view.dispatch({ effects: [compositionEnded.of(), recompute.of()] });
+        }
+      }, 0);
+    },
+  },
+  provide: () => compositionActive,
+});
+
+// 注册一次主题监听，清理所有文档缓存并让两个分屏分别重算。
+onCodeThemeChange(() => {
+  tokenDocuments.forEach((data) => {
+    data.cache.clear();
+    data.store.clear();
+    data.gen++;
+  });
+  editorViews.forEach((editorView) => editorView.dispatch({ effects: recompute.of() }));
+});
+
 // treeWatcher：检测语法树对象引用变化（异步解析推进会返回新 Tree 对象）。
 // 旧逻辑仅在 viewportChanged 时检查，导致光标在视口内移动时即使语法树异步解析完成也不刷新装饰，
 // 表现为 ~~删除线~~、<u>下划线</u> 等依赖语法树节点的格式光标离开后不显示预览。
 export const treeWatcher = ViewPlugin.fromClass(class {
   lastTree: unknown = null;
+  pending = false;
+  destroyed = false;
+
+  constructor(readonly view: EditorView) {}
+
   update(vu: ViewUpdate) {
     const tree = syntaxTree(vu.view.state);
     if (tree === this.lastTree) return;
     this.lastTree = tree;
     // docChanged 已由 livePreview.update 处理，避免重复 build
-    if (!vu.docChanged) {
-      vu.view.dispatch({ effects: recompute.of() });
-    }
+    if (vu.docChanged || this.pending) return;
+
+    // CodeMirror 不允许在插件的 update 周期内再次 dispatch。延迟到微任务，
+    // 同时合并同一轮解析产生的重复通知，避免分屏/主题切换时插件崩溃。
+    this.pending = true;
+    queueMicrotask(() => {
+      this.pending = false;
+      if (!this.destroyed) this.view.dispatch({ effects: recompute.of() });
+    });
   }
+
+  destroy() { this.destroyed = true; }
 }, {});
 
 // ---- 代码块逐行着色（异步）----
 // 携带着色 token 的 effect：{ base: 代码内容起始绝对偏移, tokens: 各 token 相对 base 的偏移+颜色, gen: 调度时的文档代际 }
 const codeTokens = StateEffect.define<{ base: number; tokens: TokenLine[]; gen: number }>();
 
-interface CodeBlockRequest { base: number; code: string; lang: string; gen: number; }
+interface CodeBlockRequest { documentId: number; base: number; code: string; lang: string; gen: number; }
 let pendingCode: CodeBlockRequest[] = [];
 let scheduled = false;
-// 文档代际：每次 doc 变更递增。异步 token 到达时比对 gen，丢弃过期请求（防竞态：旧 base 偏移已失效）
-let codeGen = 0;
-// 当前文档中所有代码块的 base 集合（buildUnsafe 填充，build 末尾用于清理 tokenStore 中已删除块的过期条目）
-const currentBases = new Set<number>();
 
-// 已计算并 dispatch 过的代码块（key=base+lang+code），避免光标移动/选择变化时重复 tokenize
-const tokenizedCache = new Map<string, string>();
-
-// 已着色代码块的 token 累积（key=base，val=tokens）。
-// codeTokenField 收到 effect 时写入此 map，并从全量 map 重建装饰，
-// 保证文档含多个代码块时每个块的 per-token 颜色都保留（而非被后到的 effect 覆盖）。
-const tokenStore = new Map<number, TokenLine[]>();
-
-function scheduleCodeTokens(base: number, code: string, lang: string): void {
-  currentBases.add(base); // 记录当前文档中存在的代码块（无论是否命中缓存），供 build 末尾清理过期 tokenStore 条目
+function scheduleCodeTokens(state: EditorState, base: number, code: string, lang: string): void {
+  const id = documentId(state);
+  const data = tokenData(id);
+  data.currentBases.add(base);
   const key = `${base}|${lang}|${code}`;
-  if (tokenizedCache.has(key)) return; // 同一代码块已着色，跳过
+  if (data.cache.has(key)) return;
   // LRU 淘汰：满额时删最早一条，避免全清导致批量重算闪烁
-  if (tokenizedCache.size >= 200) {
-    const first = tokenizedCache.keys().next().value;
-    if (first !== undefined) tokenizedCache.delete(first);
+  if (data.cache.size >= 200) {
+    const first = data.cache.keys().next().value;
+    if (first !== undefined) data.cache.delete(first);
   }
-  tokenizedCache.set(key, ''); // 先占位，防并发重复调度
-  pendingCode.push({ base, code, lang, gen: codeGen });
+  data.cache.set(key, '');
+  pendingCode.push({ documentId: id, base, code, lang, gen: data.gen });
   if (scheduled) return;
   scheduled = true;
   void (async () => {
@@ -95,14 +188,16 @@ function scheduleCodeTokens(base: number, code: string, lang: string): void {
     const reqs = pendingCode;
     pendingCode = [];
     scheduled = false;
-    if (!activeView) return;
     for (const r of reqs) {
-      // 跳过过期请求（文档已变更，旧 base 偏移失效）
-      if (r.gen !== codeGen) continue;
+      const requestData = tokenData(r.documentId);
+      if (r.gen !== requestData.gen) continue;
       const lines = await highlightTokens(r.code, r.lang);
-      // await 期间文档可能再次变更，重新校验代际
-      if (lines && activeView && r.gen === codeGen) {
-        activeView.dispatch({ effects: codeTokens.of({ base: r.base, tokens: lines, gen: r.gen }) });
+      if (!lines || r.gen !== requestData.gen) continue;
+      // 同一文档可同时显示在两个分屏中；异步 token 到达时必须给每个对应 View
+      // 派发 effect，不能只更新 Set 中的第一个视图。
+      const targets = Array.from(editorViews).filter((editorView) => documentId(editorView.state) === r.documentId);
+      for (const target of targets) {
+        target.dispatch({ effects: codeTokens.of({ base: r.base, tokens: lines, gen: r.gen }) });
       }
     }
   })();
@@ -139,17 +234,37 @@ function selectionInside(state: EditorState, from: number, to: number): boolean 
   return false;
 }
 
+// HTML 或行内 Markdown 刚输入完闭合标记时，折叠光标会恰好位于装饰范围的右边界。
+// 此时先保留源码；用户继续输入一个字符后，光标自然越过范围，再切换为预览。
+// 这样新文字会留在格式范围右侧，而不会在隐藏闭合标记时被浏览器重新映射到左侧。
+function selectionTouchesInlineBoundary(state: EditorState, from: number, to: number): boolean {
+  for (const range of state.selection.ranges) {
+    if (range.empty) {
+      if (range.head >= from && range.head <= to) return true;
+    } else if (range.from < to && range.to > from) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // 块级 Widget 的 range 须按行对齐：to 已在行首则直接用，否则扩到下一行起始（避免多吃一行）
-export function blockEnd(state: EditorState, to: number): number {
+export function blockEnd(state: EditorState, to: number, preserveFinalBlank = false): number {
   const ln = state.doc.lineAt(to);
   if (ln.from === to) return to; // to 已在行首
+  // 表格后的最后一个空行是用户继续输入的落点。不要把它吞进 block replacement，
+  // 否则状态栏有“下一行”，屏幕上却没有可见光标。
+  if (preserveFinalBlank && ln.number < state.doc.lines) {
+    const next = state.doc.line(ln.number + 1);
+    if (next.number === state.doc.lines && next.text === '') return to;
+  }
   return ln.number < state.doc.lines ? state.doc.line(ln.number + 1).from : state.doc.length;
 }
 
-export function build(state: EditorState): DecorationSet {
-  currentBases.clear();
+export function build(state: EditorState, waitForParse = true): DecorationSet {
+  tokenData(state).currentBases.clear();
   try {
-    return buildUnsafe(state);
+    return buildUnsafe(state, waitForParse);
   } catch (e) {
     console.error('[live-preview] build 失败：', e);
     return Decoration.none;
@@ -171,7 +286,7 @@ function blockquoteDecos(state: EditorState, node: { from: number; to: number },
   const calloutMatch = firstText.match(/^\s*>+\s*\[!([A-Za-z]+)\]\s*-?\s*(.*)$/);
   const isCallout = !!(calloutMatch && CALLOTYPES.has(calloutMatch[1].toLowerCase()));
   const collapsible = isCallout && /^\s*>+\s*\[![A-Za-z]+\]-\s*/.test(firstText);
-  const blockKey = `${node.from}`;
+  const blockKey = `${documentId(state)}:${node.from}`;
 
   // callout：整个块左侧色条 + 首行标题 widget
   const calloutCls = isCallout ? ` md-callout md-callout-${calloutMatch![1].toLowerCase()}` : '';
@@ -212,9 +327,9 @@ function blockquoteDecos(state: EditorState, node: { from: number; to: number },
     decos.push({
       from: absHeaderStart, to: headerEnd,
       dec: Decoration.replace({
-        widget: new CalloutHeaderWidget(type, title.trim(), collapsible, collapsedBool, blockKey, activeView!, (key) => {
+        widget: new CalloutHeaderWidget(type, title.trim(), collapsible, collapsedBool, blockKey, (key, widgetView) => {
           collapsedBlocks.set(key, !(collapsedBlocks.get(key) ?? false));
-          activeView?.dispatch({ effects: recompute.of() });
+          widgetView.dispatch({ effects: recompute.of() });
         }),
       }),
     });
@@ -225,11 +340,9 @@ function blockquoteDecos(state: EditorState, node: { from: number; to: number },
 const collapsedBlocks = new Map<string, boolean>();
 
 // 行内 HTML（FR-2 内嵌 HTML）：在段落内收集 HTMLTag，成对/自闭合替换为渲染结果
-function inlineHtmlDecos(state: EditorState, active: Set<number>): Deco[] {
+function inlineHtmlDecos(state: EditorState, active: Set<number>, tree = syntaxTree(state)): Deco[] {
   const decos: Deco[] = [];
   const perParent = new Map<number, { tag: string; close: boolean; self: boolean; from: number; to: number }[]>();
-  // 强制同步解析，确保 <u>、<mark> 等 HTMLTag 节点存在（与 buildUnsafe 同理）
-  const tree = ensureSyntaxTree(state, state.doc.length, 50) ?? syntaxTree(state);
   tree.iterate({
     enter(node) {
       if (node.name !== 'HTMLTag') return;
@@ -255,12 +368,27 @@ function inlineHtmlDecos(state: EditorState, active: Set<number>): Deco[] {
       if (n.close) {
         const open = stack.pop();
         if (open && open.tag === n.tag) {
-          if (selectionInside(state, open.from, n.to)) continue;
-          decos.push({ from: open.from, to: n.to, dec: Decoration.replace({ widget: new HtmlWidget(state.doc.sliceString(open.from, n.to)) }) });
+          if (selectionTouchesInlineBoundary(state, open.from, n.to)) continue;
+          decos.push({
+            from: open.from,
+            to: n.to,
+            // 明确保持两端非 inclusive：在标签边界输入的文字不能被吸进 HTML 替换区。
+            dec: Decoration.replace({
+              widget: new HtmlWidget(state.doc.sliceString(open.from, n.to)),
+              inclusive: false,
+            }),
+          });
         }
       } else if (n.self) {
-        if (selectionInside(state, n.from, n.to)) continue;
-        decos.push({ from: n.from, to: n.to, dec: Decoration.replace({ widget: new HtmlWidget(state.doc.sliceString(n.from, n.to)) }) });
+        if (selectionTouchesInlineBoundary(state, n.from, n.to)) continue;
+        decos.push({
+          from: n.from,
+          to: n.to,
+          dec: Decoration.replace({
+            widget: new HtmlWidget(state.doc.sliceString(n.from, n.to)),
+            inclusive: false,
+          }),
+        });
       } else {
         stack.push(n);
       }
@@ -269,7 +397,7 @@ function inlineHtmlDecos(state: EditorState, active: Set<number>): Deco[] {
   return decos;
 }
 
-function buildUnsafe(state: EditorState): DecorationSet {
+function buildUnsafe(state: EditorState, waitForParse: boolean): DecorationSet {
   const active = activeLines(state);
   const decos: Deco[] = [];
   const occupy: Range[] = [];
@@ -277,7 +405,9 @@ function buildUnsafe(state: EditorState): DecorationSet {
   // 强制同步解析整个文档（最多等待 50ms），确保行内格式节点（Strikethrough/HTMLTag/Emphasis 等）存在。
   // 大文档异步解析未完成时，syntaxTree(state) 返回的树可能缺失节点，导致 ~~删除线~~、<u>下划线</u> 等不渲染预览。
   // 测试用例使用 EditorState.create 创建小文档，语法树同步解析完成，所以测试通过但生产环境出问题。
-  const tree = ensureSyntaxTree(state, state.doc.length, 50) ?? syntaxTree(state);
+  const tree = waitForParse
+    ? ensureSyntaxTree(state, state.doc.length, 50) ?? syntaxTree(state)
+    : syntaxTree(state);
   tree.iterate({
     enter(node) {
       const name = node.name;
@@ -293,17 +423,17 @@ function buildUnsafe(state: EditorState): DecorationSet {
           const lang = (m[1] || '').trim().split(/\s+/)[0] || '';
           // mermaid 代码块 → 渲染为图表（用户需求）
           if (lang === 'mermaid') {
-            decos.push({ from: node.from, to, dec: Decoration.replace({ widget: new MermaidWidget(m[2].replace(/\n$/, ''), node.from, activeView!), block: true }) });
+            decos.push({ from: node.from, to, dec: Decoration.replace({ widget: new MermaidWidget(m[2].replace(/\n$/, ''), node.from), block: true }) });
             return false;
           }
           if (lang === 'dataview') {
-            decos.push({ from: node.from, to, dec: Decoration.replace({ widget: new DataviewWidget(m[2].replace(/\n$/, ''), node.from, activeView!), block: true }) });
+            decos.push({ from: node.from, to, dec: Decoration.replace({ widget: new DataviewWidget(m[2].replace(/\n$/, ''), node.from), block: true }) });
             return false;
           }
           // 普通代码块：逐行渲染（保持行可导航/可选/对齐行号，而非 block 替换 widget）
           const code = m[2].replace(/\n$/, '');
           const codeStart = node.from + m[1].length + 4; // ```lang\n 之后
-          scheduleCodeTokens(codeStart, code, lang);
+          scheduleCodeTokens(state, codeStart, code, lang);
           // 每一行都套深色背景（含 ```lang 行与闭合 ``` 行）
           const firstLn = state.doc.lineAt(node.from).number;
           const lastLn = state.doc.lineAt(node.to).number;
@@ -332,7 +462,7 @@ function buildUnsafe(state: EditorState): DecorationSet {
         occupy.push({ from: node.from, to });
         if (overlapsLine(state, node.from, node.to, active)) return false;
         const code = state.doc.sliceString(node.from, node.to).replace(/^ {4}/gm, '');
-        scheduleCodeTokens(node.from, code, '');
+        scheduleCodeTokens(state, node.from, code, '');
         const firstLn = state.doc.lineAt(node.from).number;
         const lastLn = state.doc.lineAt(node.to).number;
         for (let n = firstLn; n <= lastLn; n++) {
@@ -369,13 +499,13 @@ function buildUnsafe(state: EditorState): DecorationSet {
       }
 
       if (name === 'Table') {
-        const to = blockEnd(state, node.to);
+        const to = blockEnd(state, node.to, true);
         occupy.push({ from: node.from, to });
         // 始终渲染预览模式（用户偏好预览编辑，双击单元格编辑内容）
         const src = state.doc.sliceString(node.from, node.to);
         const rowCount = src.split('\n').filter((l) => l.trim() !== '' && !/^\s*\|?\s*:?-+:?\s*\|?\s*$/.test(l.trim())).length;
         if (rowCount < 1) return false; // 无表头不渲染
-        decos.push({ from: node.from, to, dec: Decoration.replace({ widget: new TableWidget(src, node.from, activeView!), block: true }) });
+        decos.push({ from: node.from, to, dec: Decoration.replace({ widget: new TableWidget(src, node.from), block: true }) });
         return false;
       }
 
@@ -384,7 +514,7 @@ function buildUnsafe(state: EditorState): DecorationSet {
         if (overlapsLine(state, node.from, node.to, active)) return false;
         const text = state.doc.sliceString(node.from, node.to);
         const mm = text.match(/^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)$/);
-        if (mm) decos.push({ from: node.from, to: node.to, dec: Decoration.replace({ widget: new ImageWidget(mm[1], mm[2], node.from, activeView!) }) });
+        if (mm) decos.push({ from: node.from, to: node.to, dec: Decoration.replace({ widget: new ImageWidget(mm[1], mm[2], node.from) }) });
         return false;
       }
 
@@ -407,7 +537,7 @@ function buildUnsafe(state: EditorState): DecorationSet {
         if (overlapsLine(state, node.from, node.to, active)) return false;
         const text = state.doc.sliceString(node.from, node.to);
         const checked = /x/i.test(text);
-        decos.push({ from: node.from, to: node.to, dec: Decoration.replace({ widget: new CheckboxWidget(node.from, node.to, checked, activeView!) }) });
+        decos.push({ from: node.from, to: node.to, dec: Decoration.replace({ widget: new CheckboxWidget(node.from, node.to, checked) }) });
         return false;
       }
 
@@ -431,9 +561,10 @@ function buildUnsafe(state: EditorState): DecorationSet {
           return false;
         }
         if (name === 'StrongEmphasis' || name === 'Emphasis' || name === 'Strikethrough' || name === 'InlineCode') {
-          // 行内元素：光标在区间外即渲染（输入完标记按空格/回车 → 立即预览）；
-          // 光标仍在标记区间内则保持源码便于编辑。
-          if (selectionInside(state, node.from, node.to)) return false;
+          // 光标在区间内或刚完成闭合标记、位于右边界时保留源码。
+          // 再输入一个字符后光标越过范围，才隐藏标记并渲染预览，避免 IME 在
+          // replace 装饰边界提交文字时把 DOM 光标映射回新文字左侧。
+          if (selectionTouchesInlineBoundary(state, node.from, node.to)) return false;
           const text = state.doc.sliceString(node.from, node.to);
           const parent = node.node.parent;
           const parentName = parent?.name ?? '';
@@ -441,7 +572,7 @@ function buildUnsafe(state: EditorState): DecorationSet {
           // 只处理外层（Emphasis 且 text 是 ***...***），内层 StrongEmphasis 跳过避免重复。
           if (name === 'StrongEmphasis' && parentName === 'Emphasis') return false;
           let markerLen = 0; let cls = '';
-          if (name === 'Emphasis' && /^\*{3}.*\*{3}$/.test(text) && parentName === 'Paragraph') {
+          if (name === 'Emphasis' && /^\*{3}.*\*{3}$/.test(text) && INLINE_PARENTS.has(parentName)) {
             markerLen = 3; cls = 'md-bold md-italic';
           } else if (name === 'StrongEmphasis') { markerLen = 2; cls = 'md-bold'; }
           else if (name === 'Emphasis') { markerLen = 1; cls = 'md-italic'; }
@@ -462,7 +593,7 @@ function buildUnsafe(state: EditorState): DecorationSet {
     },
   });
 
-  const htmlDecos = inlineHtmlDecos(state, active);
+  const htmlDecos = inlineHtmlDecos(state, active, tree);
   for (const h of htmlDecos) occupy.push({ from: h.from, to: h.to });
   decos.push(...htmlDecos);
 
@@ -479,10 +610,10 @@ function buildUnsafe(state: EditorState): DecorationSet {
     if (atLineStart) {
       const to = blockEnd(state, contentTo);
       occupy.push({ from, to });
-      decos.push({ from, to, dec: Decoration.replace({ widget: new BlockMathWidget(m[1], from, activeView!), block: true }) });
+      decos.push({ from, to, dec: Decoration.replace({ widget: new BlockMathWidget(m[1], from), block: true }) });
     } else {
       occupy.push({ from, to: contentTo });
-      decos.push({ from, to: contentTo, dec: Decoration.replace({ widget: new BlockMathWidget(m[1], from, activeView!) }) });
+      decos.push({ from, to: contentTo, dec: Decoration.replace({ widget: new BlockMathWidget(m[1], from) }) });
     }
   }
 
@@ -491,7 +622,7 @@ function buildUnsafe(state: EditorState): DecorationSet {
     const from = m.index, to = m.index + m[0].length;
     if (insideAny(from, to, occupy)) continue;
     if (selectionInside(state, from, to)) continue;
-    decos.push({ from, to, dec: Decoration.replace({ widget: new InlineMathWidget(m[1], from, activeView!) }) });
+    decos.push({ from, to, dec: Decoration.replace({ widget: new InlineMathWidget(m[1], from) }) });
   }
 
   // ==高亮==（用户需求）：非活跃时隐藏 == 标记、正文套 md-highlight
@@ -499,7 +630,7 @@ function buildUnsafe(state: EditorState): DecorationSet {
   while ((m = hlRe.exec(text))) {
     const from = m.index, to = m.index + m[0].length;
     if (insideAny(from, to, occupy)) continue;
-    if (selectionInside(state, from, to)) continue;
+    if (selectionTouchesInlineBoundary(state, from, to)) continue;
     decos.push({ from, to: from + 2, dec: Decoration.replace({}) });
     decos.push({ from: from + 2, to: to - 2, dec: Decoration.mark({ class: 'md-highlight' }) });
     decos.push({ from: to - 2, to, dec: Decoration.replace({}) });
@@ -520,36 +651,60 @@ function buildUnsafe(state: EditorState): DecorationSet {
 export const livePreview = StateField.define<DecorationSet>({
   create: build,
   update(deco, tr) {
+    const composing = tr.state.field(compositionActive, false) === true
+      || tr.isUserEvent('input.type.compose');
     if (tr.docChanged) {
+      const data = tokenData(tr.state);
       // 文档变化：映射 tokenStore 各条目的 base 偏移（保留近似着色，防闪烁），递增代际，清空缓存
       // 不清空 tokenStore —— 旧 token 偏移经 mapPos 映射后仍近似正确，异步重新着色到达后平滑替换
-      if (tokenStore.size > 0) {
+      if (data.store.size > 0) {
         const mapped = new Map<number, TokenLine[]>();
-        for (const [base, tokens] of tokenStore) mapped.set(tr.changes.mapPos(base), tokens);
-        tokenStore.clear();
-        for (const [k, v] of mapped) tokenStore.set(k, v);
+        for (const [base, tokens] of data.store) mapped.set(tr.changes.mapPos(base), tokens);
+        data.store.clear();
+        for (const [key, value] of mapped) data.store.set(key, value);
       }
-      codeGen++;
-      tokenizedCache.clear();
+      data.gen++;
+      data.cache.clear();
+      // composition 的原生 DOM/选区仍由浏览器维护。这里只映射已有装饰，既不会把
+      // 源码突然折叠成 widget，也不会把已有预览展开，从而同时避免光标错位和闪烁。
+      if (composing) return deco.map(tr.changes);
+
       const result = build(tr.state);
       // 仅在 doc 变更时清理已删除代码块的过期条目（光标移动不会删除代码块，无需清理）
-      for (const base of tokenStore.keys()) {
-        if (!currentBases.has(base)) tokenStore.delete(base);
+      for (const base of data.store.keys()) {
+        if (!data.currentBases.has(base)) data.store.delete(base);
       }
       return result;
     }
+    if (composing) return deco;
     if (tr.selection || tr.effects.some((e) => e.is(recompute))) {
-      return build(tr.state);
+      // 光标移动只需要使用已经可用的语法树重建装饰；完整解析由文档修改或
+      // treeWatcher 的 recompute 负责，避免每次按方向键都同步等待 50ms。
+      return build(tr.state, false);
     }
     return deco;
   },
-  provide: (f) => EditorView.decorations.from(f),
+  provide: (field) => [
+    EditorView.decorations.from(field),
+    // CodeMirror 要求被 replace 的范围同时作为 atomicRanges 提供，才能在浏览器把
+    // DOM 光标映射到 widget 内部时，将输入可靠地校正到替换区的正确一侧。
+    // 这里只收集 HtmlWidget，避免让普通高亮/隐藏标记也变成不可逐字导航的原子范围。
+    EditorView.atomicRanges.of((view) => {
+      const builder = new RangeSetBuilder<Decoration>();
+      view.state.field(field).between(0, view.state.doc.length, (from, to, decoration) => {
+        if (from < to && decoration.spec.widget instanceof HtmlWidget) {
+          builder.add(from, to, decoration);
+        }
+      });
+      return builder.finish();
+    }),
+  ],
 });
 
-// 从全量 tokenStore 重建代码块着色装饰（保证多代码块颜色并存，而非被后到的 effect 覆盖）
-function buildTokenDecos(): DecorationSet {
+// 从当前文档的 tokenStore 重建代码块着色装饰。
+function buildTokenDecos(data: TokenDocumentData): DecorationSet {
   const ranges: { from: number; to: number; dec: Decoration }[] = [];
-  for (const [base, lines] of tokenStore) {
+  for (const [base, lines] of data.store) {
     for (const line of lines) {
       for (const t of line.tokens) {
         const from = base + t.offset;
@@ -574,43 +729,45 @@ function buildTokenDecos(): DecorationSet {
 export const codeTokenField = StateField.define<DecorationSet>({
   create: () => Decoration.none,
   update(deco, tr) {
+    const data = tokenData(tr.state);
     if (tr.docChanged) {
       // tokenStore 的 base 已由 livePreview.update（同事务先执行）通过 mapPos 映射，
       // 重建装饰保留近似着色（防闪烁），异步重新着色到达后平滑替换
-      return buildTokenDecos();
+      return buildTokenDecos(data);
     }
     const e = tr.effects.find((x) => x.is(codeTokens)) as
       | (ReturnType<typeof codeTokens.of> & { value: { base: number; tokens: TokenLine[]; gen: number } })
       | undefined;
     if (!e) return deco;
     // 丢弃过期代际的 effect（文档已变更，旧 base 偏移失效）
-    if (e.value.gen !== codeGen) return deco;
+    if (e.value.gen !== data.gen) return deco;
     // 累积到 tokenStore 后从全量重建，避免多代码块互相覆盖
-    tokenStore.set(e.value.base, e.value.tokens);
-    return buildTokenDecos();
+    data.store.set(e.value.base, e.value.tokens);
+    return buildTokenDecos(data);
   },
   provide: (f) => EditorView.decorations.from(f),
 });
 
 // ---- 测试专用导出（仅用于验证多代码块 token 累积与代际防竞态逻辑）----
 export function _testApplyTokens(base: number, tokens: TokenLine[]): void {
-  tokenStore.set(base, tokens);
+  tokenData(0).store.set(base, tokens);
 }
 export function _testBuildTokenDecos(): DecorationSet {
-  return buildTokenDecos();
+  return buildTokenDecos(tokenData(0));
 }
 export function _testClearTokenStore(): void {
-  tokenStore.clear();
+  tokenData(0).store.clear();
 }
-export function _testCodeGen(): number { return codeGen; }
-export function _testBumpGen(): void { codeGen++; }
+export function _testCodeGen(): number { return tokenData(0).gen; }
+export function _testBumpGen(): void { tokenData(0).gen++; }
 export function _testMakeCodeTokenEffect(base: number, tokens: TokenLine[], gen: number) {
   return codeTokens.of({ base, tokens, gen });
 }
 // 模拟 livePreview.update 在 doc 变更时的 base 映射（单测无 EditorView 驱动语法树解析，无法走完整 update 流程）
 export function _testMapBases(mapPos: (pos: number) => number): void {
+  const data = tokenData(0);
   const mapped = new Map<number, TokenLine[]>();
-  for (const [base, tokens] of tokenStore) mapped.set(mapPos(base), tokens);
-  tokenStore.clear();
-  for (const [k, v] of mapped) tokenStore.set(k, v);
+  for (const [base, tokens] of data.store) mapped.set(mapPos(base), tokens);
+  data.store.clear();
+  for (const [key, value] of mapped) data.store.set(key, value);
 }

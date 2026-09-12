@@ -1,8 +1,8 @@
-// 多标签（需求 FR-7.8）：单 EditorView + 每标签一个 EditorState
-// 切换标签 = view.setState(tab.state)，见 state.ts 的 setSuppressNextUpdate 抑制误触发。
-import { EditorState } from '@codemirror/state';
-import type { EditorView } from '@codemirror/view';
-import { createEditorState, setSuppressNextUpdate } from '../editor/cm/state';
+// 多标签与多编辑区共享模型：标签保存文档状态，编辑区只负责显示某个标签。
+// 同一标签可出现在两个分屏中；文档变更会同步，光标与滚动位置保持各自独立。
+import { EditorState, Transaction } from '@codemirror/state';
+import type { EditorView, ViewUpdate } from '@codemirror/view';
+import { createEditorState, suppressNextUpdateFor } from '../editor/cm/state';
 import { store } from './state';
 import { cancelAutosave } from './autosave';
 
@@ -14,113 +14,212 @@ export interface Tab {
   state: EditorState;
 }
 
+type Listener = () => void;
+
 const tabs: Tab[] = [];
+const viewTabs = new Map<EditorView, number>();
+const listeners = new Set<Listener>();
 let currentId: number | null = null;
+let currentView: EditorView | null = null;
 let seq = 1;
 
+function notify(): void {
+  listeners.forEach((listener) => listener());
+}
+
+export function onTabsChanged(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 export function currentTab(): Tab | null {
-  return tabs.find((t) => t.id === currentId) ?? null;
+  return tabs.find((tab) => tab.id === currentId) ?? null;
+}
+
+export function activeEditorView(): EditorView | null {
+  return currentView;
 }
 
 export function tabList(): readonly Tab[] {
   return tabs;
 }
 
-// 把当前标签的 path/name/dirty 同步进 store（状态栏/标题等 UI 订阅 store）
+export function tabForView(view: EditorView): Tab | null {
+  const id = viewTabs.get(view);
+  return tabs.find((tab) => tab.id === id) ?? null;
+}
+
 function syncCurrentToStore(): void {
-  const t = currentTab();
-  if (t) store.set({ path: t.path, name: t.name, dirty: t.dirty });
+  const tab = currentTab();
+  if (tab) store.set({ path: tab.path, name: tab.name, dirty: tab.dirty });
 }
 
-function activate(view: EditorView, id: number): void {
-  const t = tabs.find((x) => x.id === id);
-  if (!t) return;
+function setCurrentView(view: EditorView): void {
+  const id = viewTabs.get(view);
+  if (id === undefined) return;
+  currentView = view;
   currentId = id;
-  cancelAutosave(); // 切换标签：取消未决的自动保存快照，避免写错路径
-  setSuppressNextUpdate(true);
-  view.setState(t.state);
   syncCurrentToStore();
+  notify();
 }
 
-// 启动首标签：复用已创建的 EditorView 当前状态（main.ts 已用空文档创建视图）
+function assignView(view: EditorView, tab: Tab, makeCurrent: boolean): void {
+  viewTabs.set(view, tab.id);
+  if (view.state !== tab.state) {
+    suppressNextUpdateFor(view);
+    view.setState(tab.state);
+  }
+  if (makeCurrent) setCurrentView(view);
+  else notify();
+}
+
 export function registerFirstTab(view: EditorView, name: string, path: string | null): void {
-  const t: Tab = { id: seq++, name, path, dirty: false, state: view.state };
-  tabs.push(t);
-  currentId = t.id;
-  syncCurrentToStore();
+  const tab: Tab = { id: seq++, name, path, dirty: false, state: view.state };
+  tabs.push(tab);
+  assignView(view, tab, true);
 }
 
-// 标记当前标签脏/干净（编辑回调与自动保存调用）
+export function registerPaneView(view: EditorView, tabId?: number, makeCurrent = false): void {
+  const tab = tabs.find((item) => item.id === tabId) ?? currentTab() ?? tabs[0];
+  if (!tab) throw new Error('没有可显示的标签');
+  assignView(view, tab, makeCurrent);
+}
+
+export function unregisterPaneView(view: EditorView): void {
+  viewTabs.delete(view);
+  if (currentView === view) {
+    currentView = viewTabs.keys().next().value ?? null;
+    currentId = currentView ? viewTabs.get(currentView) ?? null : null;
+    syncCurrentToStore();
+  }
+  notify();
+}
+
+export function activatePaneView(view: EditorView): void {
+  setCurrentView(view);
+}
+
+export function showTab(view: EditorView, id: number, makeCurrent = true): void {
+  const tab = tabs.find((item) => item.id === id);
+  if (!tab) return;
+  assignView(view, tab, makeCurrent);
+}
+
+/** Keep the canonical tab state in sync and mirror document edits into another pane. */
+export function syncViewUpdate(update: ViewUpdate): void {
+  const tab = tabForView(update.view);
+  if (!tab) return;
+  tab.state = update.state;
+
+  if (update.docChanged) {
+    for (const [otherView, tabId] of viewTabs) {
+      if (otherView === update.view || tabId !== tab.id) continue;
+      suppressNextUpdateFor(otherView);
+      if (otherView.state.doc.eq(update.startState.doc)) {
+        otherView.dispatch({
+          changes: update.changes,
+          annotations: Transaction.addToHistory.of(false),
+        });
+      } else {
+        // 防御性恢复：正常情况下两个视图文档应始终一致。
+        otherView.setState(createEditorState(update.state.doc.toString()));
+      }
+    }
+    notify();
+  }
+}
+
+export function setTabDirty(tab: Tab, dirty: boolean): void {
+  if (tab.dirty === dirty) return;
+  tab.dirty = dirty;
+  if (tab.id === currentId) store.set({ dirty });
+  notify();
+}
+
+export function setViewDirty(view: EditorView, dirty: boolean): void {
+  const tab = tabForView(view);
+  if (tab) setTabDirty(tab, dirty);
+}
+
 export function setCurrentDirty(dirty: boolean): void {
-  const t = currentTab();
-  if (!t || t.dirty === dirty) return;
-  t.dirty = dirty;
-  store.set({ dirty });
+  const tab = currentTab();
+  if (tab) setTabDirty(tab, dirty);
 }
 
-// 编辑后同步当前标签的状态引用（CM 状态不可变，dispatch 产生新 state，须回写 tab.state）
-export function syncCurrentState(state: EditorState): void {
-  const t = currentTab();
-  if (t) t.state = state;
-}
-
-// 打开文件到标签：同路径已在 → 激活既有标签；首个空白标签被复用；否则新建
 export function openInTab(view: EditorView, doc: string, meta: { name: string; path: string }): Tab {
-  const existing = tabs.find((t) => t.path === meta.path);
+  const existing = tabs.find((tab) => tab.path === meta.path);
   if (existing) {
-    activate(view, existing.id);
+    showTab(view, existing.id, true);
     return existing;
   }
-  const blank = tabs.find((t) => !t.path && t.name === '未命名.md' && !t.dirty && t.state.doc.length === 0);
+
+  const blank = tabs.find((tab) => !tab.path && tab.name === '未命名.md' && !tab.dirty && tab.state.doc.length === 0);
   if (blank) {
     blank.name = meta.name;
     blank.path = meta.path;
     blank.state = createEditorState(doc);
-    activate(view, blank.id);
+    showTab(view, blank.id, true);
     return blank;
   }
+
   return pushTab(view, doc, meta);
 }
 
 function pushTab(view: EditorView, doc: string, meta: { name: string; path: string | null }): Tab {
-  const t: Tab = { id: seq++, name: meta.name, path: meta.path, dirty: false, state: createEditorState(doc) };
-  tabs.push(t);
-  activate(view, t.id);
-  return t;
+  const tab: Tab = { id: seq++, name: meta.name, path: meta.path, dirty: false, state: createEditorState(doc) };
+  tabs.push(tab);
+  assignView(view, tab, true);
+  return tab;
 }
 
 export function newTab(view: EditorView): Tab {
   return pushTab(view, '', { name: '未命名.md', path: null });
 }
 
-// 关闭标签：脏标记时确认（FR-7.8）；至少保留一个标签
+export function suggestedSplitTab(): Tab | null {
+  const current = currentTab();
+  if (!current) return tabs[0] ?? null;
+  const index = tabs.findIndex((tab) => tab.id === current.id);
+  return tabs[index + 1] ?? tabs[index - 1] ?? current;
+}
+
 export function closeTab(view: EditorView, id: number): boolean {
-  const idx = tabs.findIndex((t) => t.id === id);
-  if (idx < 0) return false;
-  const t = tabs[idx];
-  if (t.dirty && !confirm(`「${t.name}」有未保存的修改，确定关闭吗？`)) return false;
-  const wasCurrent = currentId === id;
-  tabs.splice(idx, 1);
-  if (tabs.length === 0) {
-    newTab(view);
-    return true;
+  const index = tabs.findIndex((tab) => tab.id === id);
+  if (index < 0) return false;
+  const tab = tabs[index];
+  if (tab.dirty && !confirm(`「${tab.name}」有未保存的修改，确定关闭吗？`)) return false;
+
+  cancelAutosave(tab.id);
+  tabs.splice(index, 1);
+  let replacement = tabs[Math.min(index, tabs.length - 1)] ?? null;
+  if (!replacement) {
+    replacement = { id: seq++, name: '未命名.md', path: null, dirty: false, state: createEditorState('') };
+    tabs.push(replacement);
   }
-  if (wasCurrent) {
-    activate(view, tabs[Math.min(idx, tabs.length - 1)].id);
+
+  for (const [paneView, tabId] of viewTabs) {
+    if (tabId === id) assignView(paneView, replacement, paneView === currentView);
   }
+  if (currentId === id) assignView(view, replacement, true);
+  syncCurrentToStore();
+  notify();
   return true;
 }
 
-// 切换标签
 export function switchTab(view: EditorView, id: number): void {
-  activate(view, id);
+  showTab(view, id, true);
 }
 
-// 另存为后更新当前标签的路径与名称
+export function renameTab(id: number, path: string, name: string): void {
+  const tab = tabs.find((item) => item.id === id);
+  if (!tab) return;
+  tab.path = path;
+  tab.name = name;
+  if (tab.id === currentId) syncCurrentToStore();
+  notify();
+}
+
 export function renameCurrent(path: string, name: string): void {
-  const t = currentTab();
-  if (!t) return;
-  t.path = path;
-  t.name = name;
-  syncCurrentToStore();
+  const tab = currentTab();
+  if (tab) renameTab(tab.id, path, name);
 }

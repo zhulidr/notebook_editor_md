@@ -8,7 +8,7 @@ import { highlight } from '../highlight/shiki';
 import { sanitizeHtml } from '../editor/widgets/html';
 import { getCodeBg } from '../editor/cm/settings';
 
-mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'strict' });
 
 const md = new MarkdownIt({ html: true, breaks: false, linkify: true, typographer: true });
 

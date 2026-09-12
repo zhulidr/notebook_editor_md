@@ -29,7 +29,7 @@ const darkTheme = EditorView.theme({
 
 const themeComp = new Compartment();
 let mode: ThemeMode = (localStorage.getItem('md-editor:theme') as ThemeMode) || 'auto';
-let view: EditorView | null = null;
+const views = new Set<EditorView>();
 
 function isDark(): boolean {
   return mode === 'dark' || (mode === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
@@ -41,19 +41,34 @@ export function themeExtension() {
 }
 
 export function initTheme(v: EditorView): void {
-  view = v;
+  views.add(v);
   apply();
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
     if (mode === 'auto') apply();
   });
 }
 
+export function registerThemeView(view: EditorView): void {
+  views.add(view);
+  view.dispatch({ effects: themeComp.reconfigure(isDark() ? darkTheme : lightTheme) });
+}
+
+export function unregisterThemeView(view: EditorView): void {
+  views.delete(view);
+}
+
 function apply(): void {
   const dark = isDark();
   document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
-  if (view) view.dispatch({ effects: themeComp.reconfigure(dark ? darkTheme : lightTheme) });
+  views.forEach((editorView) => editorView.dispatch({ effects: themeComp.reconfigure(dark ? darkTheme : lightTheme) }));
   const btn = document.getElementById('btn-theme');
-  if (btn) btn.textContent = mode === 'auto' ? '主题·自动' : mode === 'dark' ? '主题·暗' : '主题·亮';
+  if (btn) {
+    const label = btn.querySelector('span');
+    if (label) label.textContent = '主题';
+    const modeLabel = mode === 'auto' ? '自动' : mode === 'dark' ? '深色' : '浅色';
+    btn.setAttribute('aria-label', `主题：${modeLabel}`);
+    btn.title = `当前主题：${modeLabel}`;
+  }
   // 编辑器亮/暗切换后重新着色代码块（无背景模式下实际背景随编辑器主题变化）
   triggerRehighlight();
 }
